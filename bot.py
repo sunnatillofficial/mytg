@@ -242,11 +242,13 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    logger.info(f"Xabar keldi. Chat ID: {chat_id}, Ruxsat etilganlar: {ALLOWED_CHAT_IDS}")
+    chat = update.effective_chat
+    chat_id = chat.id
+    logger.info(f"Xabar keldi. Chat ID: {chat_id}, Turi: {chat.type}, Ruxsat etilganlar: {ALLOWED_CHAT_IDS}")
 
-    # Faqat ruxsat berilgan guruh(lar)da javob beradi
-    if chat_id not in ALLOWED_CHAT_IDS:
+    # Shaxsiy chatda - hammaga javob beradi.
+    # Guruh/superguruhda - faqat ALLOWED_CHAT_IDS ro'yxatidagilarga javob beradi.
+    if chat.type != "private" and chat_id not in ALLOWED_CHAT_IDS:
         logger.info(f"Chat ID {chat_id} ruxsat etilganlar ro'yxatida yo'q, o'tkazib yuborildi.")
         return
 
@@ -297,11 +299,16 @@ def main() -> None:
     # Foydalanuvchidan cheklovni olib tashlash komandasi (faqat adminlar uchun)
     app.add_handler(CommandHandler("unban", unban_command))
 
-    # Guruh va superguruh xabarlariga javob beradi (faqat ALLOWED_CHAT_IDS ichidagilarga)
+    # Guruh, superguruh va shaxsiy chat xabarlariga javob beradi
+    # (guruhlarda faqat ALLOWED_CHAT_IDS ichidagilarga, shaxsiy chatda hamma uchun)
     app.add_handler(
         MessageHandler(
             filters.TEXT
-            & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
+            & (
+                filters.ChatType.GROUP
+                | filters.ChatType.SUPERGROUP
+                | filters.ChatType.PRIVATE
+            )
             & ~filters.COMMAND,
             handle_message,
         )
