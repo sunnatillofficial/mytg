@@ -10,7 +10,8 @@ Ishga tushirishdan oldin .env faylini to'ldiring
 
 import os
 import logging
-from telegram import Update
+from datetime import datetime, timedelta, timezone
+from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -62,6 +63,11 @@ chat_histories: dict[int, list[dict]] = {}
 MAX_HISTORY = 10
 
 
+# Har bir foydalanuvchi necha marta ban olganini saqlab turamiz: {(chat_id, user_id): son}
+# DIQQAT: bu xotira RAM'da saqlanadi, bot qayta ishga tushsa (redeploy/restart) nolga tushadi.
+ban_counts: dict[tuple[int, int], int] = {}
+
+
 async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Joriy chat ID sini ko'rsatadi - guruh ID sini topish uchun ishlatiladi."""
     chat = update.effective_chat
@@ -69,6 +75,170 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Ushbu chat ID: `{chat.id}`\nTuri: {chat.type}",
         parse_mode="Markdown",
     )
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ban komandasi - foydalanuvchini vaqtincha cheklaydi (xabar yoza olmaydi).
+    Ishlatish usullari:
+      1) Foydalanuvchining xabariga REPLY qilib /ban deb yozish (eng ishonchli usul)
+      2) /ban @username
+      3) /ban <user_id yoki chat_id>
+    Har safar shu odam qayta ban olsa, muddat 2 baravar oshadi: 1s -> 2s -> 4s -> 8s ...
+    """
+    chat = update.effective_chat
+    message = update.message
+
+    # Faqat adminlar ban bera oladi
+    requester = await chat.get_member(message.from_user.id)
+    if requester.status not in ("administrator", "creator"):
+        await message.reply_text("Bu komandani faqat adminlar ishlatishi mumkin.")
+        return
+
+    target_user_id = None
+    target_name = None
+
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.full_name
+    elif context.args:
+        arg = context.args[0]
+        if arg.startswith("@"):
+            try:
+                chat_member_info = await context.bot.get_chat(arg)
+                target_user_id = chat_member_info.id
+                target_name = chat_member_info.full_name or arg
+            except Exception:
+                await message.reply_text(
+                    "Foydalanuvchi topilmadi. Eng ishonchli usul: "
+                    "foydalanuvchining xabariga REPLY qilib /ban deb yozing."
+                )
+                return
+        else:
+            try:
+                target_user_id = int(arg)
+                target_name = arg
+            except ValueError:
+                await message.reply_text("Noto'g'ri ID yoki username formati.")
+                return
+    else:
+        await message.reply_text(
+            "Foydalanish:\n"
+            "\u2022 Foydalanuvchi xabariga REPLY qilib: /ban\n"
+            "\u2022 Yoki: /ban @username\n"
+            "\u2022 Yoki: /ban <user_id>"
+        )
+        return
+
+    key = (chat.id, target_user_id)
+    ban_counts[key] = ban_counts.get(key, 0) + 1
+    hours = 2 ** (ban_counts[key] - 1)
+    until_date = datetime.now(timezone.utc) + timedelta(hours=hours)
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=target_user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,   # GIF, stiker, o'yin va h.k.
+                can_add_web_page_previews=False,
+            ),
+            until_date=until_date,
+        )
+        await message.reply_text(
+            f"{target_name} {hours} soatga xabar yozishdan cheklandi "
+            f"(bu {ban_counts[key]}-marta ban)."
+        )
+    except Exception as e:
+        logger.error(f"Ban berishda xatolik: {e}")
+        await message.reply_text(
+            "Cheklashda xatolik yuz berdi. Botning \"Restrict members\" "
+            "admin huquqi borligini tekshiring."
+        )
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /unban komandasi - foydalanuvchidan cheklovni oldindan olib tashlaydi.
+    Ishlatish usullari xuddi /ban kabi: reply, @username yoki user_id.
+    Eslatma: ban hisobi (necha marta ban olgani) reset qilinmaydi -
+    shuning uchun keyingi safar qayta ban olsa, muddat baribir davom etib o'sadi.
+    """
+    chat = update.effective_chat
+    message = update.message
+
+    requester = await chat.get_member(message.from_user.id)
+    if requester.status not in ("administrator", "creator"):
+        await message.reply_text("Bu komandani faqat adminlar ishlatishi mumkin.")
+        return
+
+    target_user_id = None
+    target_name = None
+
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.full_name
+    elif context.args:
+        arg = context.args[0]
+        if arg.startswith("@"):
+            try:
+                chat_member_info = await context.bot.get_chat(arg)
+                target_user_id = chat_member_info.id
+                target_name = chat_member_info.full_name or arg
+            except Exception:
+                await message.reply_text(
+                    "Foydalanuvchi topilmadi. Eng ishonchli usul: "
+                    "foydalanuvchining xabariga REPLY qilib /unban deb yozing."
+                )
+                return
+        else:
+            try:
+                target_user_id = int(arg)
+                target_name = arg
+            except ValueError:
+                await message.reply_text("Noto'g'ri ID yoki username formati.")
+                return
+    else:
+        await message.reply_text(
+            "Foydalanish:\n"
+            "\u2022 Foydalanuvchi xabariga REPLY qilib: /unban\n"
+            "\u2022 Yoki: /unban @username\n"
+            "\u2022 Yoki: /unban <user_id>"
+        )
+        return
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=target_user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            ),
+        )
+        await message.reply_text(f"{target_name} cheklovdan chiqarildi.")
+    except Exception as e:
+        logger.error(f"Unban qilishda xatolik: {e}")
+        await message.reply_text(
+            "Cheklovni olib tashlashda xatolik yuz berdi. Botning "
+            "\"Restrict members\" admin huquqi borligini tekshiring."
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -120,6 +290,12 @@ def main() -> None:
 
     # Guruh ID sini topish uchun yordamchi komanda (istalgan joyda ishlaydi)
     app.add_handler(CommandHandler("chatid", chatid_command))
+
+    # Foydalanuvchini vaqtincha cheklash komandasi (faqat adminlar uchun)
+    app.add_handler(CommandHandler("ban", ban_command))
+
+    # Foydalanuvchidan cheklovni olib tashlash komandasi (faqat adminlar uchun)
+    app.add_handler(CommandHandler("unban", unban_command))
 
     # Guruh va superguruh xabarlariga javob beradi (faqat ALLOWED_CHAT_IDS ichidagilarga)
     app.add_handler(
