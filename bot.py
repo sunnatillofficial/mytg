@@ -45,8 +45,8 @@ ALLOWED_CHAT_IDS = {
 SYSTEM_PROMPT = """
 Sen Sunnatillo o'rniga Telegram guruhidagi xabarlarga javob berayapsan.
 Uslubing: samimiy, qisqa va do'stona. O'zbek tilida, kundalik so'zlashuv uslubida yoz.
-Agar savol muhim yoki shaxsiy bo'lsa (pul, uchrashuv, muhim qaror), javob berma va
-buning o'rniga: "Hozir band ekanman, tez orada o'zim javob beraman" kabi neytral javob yoz.
+Agar savol muhim yoki shaxsiy bo'lsa (pul, uchrashuv, muhim qaror), hech qanday javob yozma -
+shunchaki "###JIM###" so'zini yoz, boshqa hech narsa qo'shma.
 Javoblaring qisqa bo'lsin (1-3 gap), haddan tashqari rasmiy bo'lma.
 """
 
@@ -63,9 +63,27 @@ chat_histories: dict[int, list[dict]] = {}
 MAX_HISTORY = 10
 
 
-# Har bir foydalanuvchi necha marta ban olganini saqlab turamiz: {(chat_id, user_id): son}
-# DIQQAT: bu xotira RAM'da saqlanadi, bot qayta ishga tushsa (redeploy/restart) nolga tushadi.
-ban_counts: dict[tuple[int, int], int] = {}
+def parse_duration(text: str) -> timedelta | None:
+    """
+    Muddat matnini timedelta ga aylantiradi.
+    Qo'llab-quvvatlanadigan formatlar: 30m, 2h, 1d (daqiqa/soat/kun)
+    Agar faqat son yozilsa (masalan "3"), soat sifatida qabul qilinadi.
+    """
+    text = text.strip().lower()
+    if not text:
+        return None
+
+    try:
+        if text.endswith("m"):
+            return timedelta(minutes=int(text[:-1]))
+        if text.endswith("h"):
+            return timedelta(hours=int(text[:-1]))
+        if text.endswith("d"):
+            return timedelta(days=int(text[:-1]))
+        # Faqat son bo'lsa - soat deb hisoblanadi
+        return timedelta(hours=int(text))
+    except ValueError:
+        return None
 
 
 async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -79,12 +97,12 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /ban komandasi - foydalanuvchini vaqtincha cheklaydi (xabar yoza olmaydi).
+    /ban komandasi - foydalanuvchini siz belgilagan muddatga cheklaydi (xabar yoza olmaydi).
     Ishlatish usullari:
-      1) Foydalanuvchining xabariga REPLY qilib /ban deb yozish (eng ishonchli usul)
-      2) /ban @username
-      3) /ban <user_id yoki chat_id>
-    Har safar shu odam qayta ban olsa, muddat 2 baravar oshadi: 1s -> 2s -> 4s -> 8s ...
+      1) Foydalanuvchining xabariga REPLY qilib: /ban <muddat>   masalan: /ban 3h
+      2) /ban @username <muddat>
+      3) /ban <user_id> <muddat>
+    Muddat formati: 30m (daqiqa), 2h (soat), 1d (kun). Faqat son yozilsa - soat deb olinadi.
     """
     chat = update.effective_chat
     message = update.message
@@ -97,10 +115,13 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     target_user_id = None
     target_name = None
+    duration_text = None
 
     if message.reply_to_message:
         target_user_id = message.reply_to_message.from_user.id
         target_name = message.reply_to_message.from_user.full_name
+        if context.args:
+            duration_text = context.args[0]
     elif context.args:
         arg = context.args[0]
         if arg.startswith("@"):
@@ -111,7 +132,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception:
                 await message.reply_text(
                     "Foydalanuvchi topilmadi. Eng ishonchli usul: "
-                    "foydalanuvchining xabariga REPLY qilib /ban deb yozing."
+                    "foydalanuvchining xabariga REPLY qilib /ban <muddat> deb yozing."
                 )
                 return
         else:
@@ -121,19 +142,32 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except ValueError:
                 await message.reply_text("Noto'g'ri ID yoki username formati.")
                 return
+        if len(context.args) > 1:
+            duration_text = context.args[1]
     else:
         await message.reply_text(
             "Foydalanish:\n"
-            "\u2022 Foydalanuvchi xabariga REPLY qilib: /ban\n"
-            "\u2022 Yoki: /ban @username\n"
-            "\u2022 Yoki: /ban <user_id>"
+            "\u2022 Foydalanuvchi xabariga REPLY qilib: /ban <muddat>  (masalan: /ban 3h)\n"
+            "\u2022 Yoki: /ban @username <muddat>\n"
+            "\u2022 Yoki: /ban <user_id> <muddat>\n\n"
+            "Muddat formati: 30m (daqiqa), 2h (soat), 1d (kun)."
         )
         return
 
-    key = (chat.id, target_user_id)
-    ban_counts[key] = ban_counts.get(key, 0) + 1
-    hours = 2 ** (ban_counts[key] - 1)
-    until_date = datetime.now(timezone.utc) + timedelta(hours=hours)
+    if not duration_text:
+        await message.reply_text(
+            "Muddatni ko'rsating. Masalan: /ban 3h (3 soat), /ban 30m (30 daqiqa), /ban 1d (1 kun)."
+        )
+        return
+
+    duration = parse_duration(duration_text)
+    if duration is None:
+        await message.reply_text(
+            "Muddat formati noto'g'ri. Masalan: 30m, 2h, 1d yoki shunchaki son (soat sifatida)."
+        )
+        return
+
+    until_date = datetime.now(timezone.utc) + duration
 
     try:
         await context.bot.restrict_chat_member(
@@ -154,8 +188,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             until_date=until_date,
         )
         await message.reply_text(
-            f"{target_name} {hours} soatga xabar yozishdan cheklandi "
-            f"(bu {ban_counts[key]}-marta ban)."
+            f"{target_name} {duration_text} muddatga xabar yozishdan cheklandi."
         )
     except Exception as e:
         logger.error(f"Ban berishda xatolik: {e}")
@@ -241,15 +274,41 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+def is_bot_addressed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Guruhda bot faqat @mention qilinganda yoki unga reply qilinganda javob berishi kerak."""
+    message = update.message
+
+    # Bot xabariga reply qilingan bo'lsa
+    if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
+        return True
+
+    # Xabarda bot @username orqali mention qilingan bo'lsa
+    bot_username = context.bot.username
+    if bot_username and message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                mentioned = message.text[entity.offset: entity.offset + entity.length]
+                if mentioned.lower() == f"@{bot_username}".lower():
+                    return True
+
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     chat_id = chat.id
     logger.info(f"Xabar keldi. Chat ID: {chat_id}, Turi: {chat.type}, Ruxsat etilganlar: {ALLOWED_CHAT_IDS}")
 
-    # Shaxsiy chatda - hammaga javob beradi.
-    # Guruh/superguruhda - faqat ALLOWED_CHAT_IDS ro'yxatidagilarga javob beradi.
-    if chat.type != "private" and chat_id not in ALLOWED_CHAT_IDS:
+    # Guruh bo'lsin, shaxsiy chat bo'lsin - faqat ALLOWED_CHAT_IDS ro'yxatidagilarga javob beradi.
+    # Shaxsiy chatda: chat ID = foydalanuvchi ID bilan bir xil, shuning uchun
+    # kerakli odamning ID sini ham shu ro'yxatga qo'shsangiz bo'ldi.
+    if chat_id not in ALLOWED_CHAT_IDS:
         logger.info(f"Chat ID {chat_id} ruxsat etilganlar ro'yxatida yo'q, o'tkazib yuborildi.")
+        return
+
+    # Guruhda faqat mention yoki reply qilingandagina javob beradi.
+    # Shaxsiy chatda esa har doim javob beradi.
+    if chat.type != "private" and not is_bot_addressed(update, context):
         return
 
     user_message = update.message.text
@@ -270,6 +329,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error(f"AI javob berishda xatolik: {e}")
         reply_text = "Kechirasiz, hozir javob bera olmayapman. Birozdan keyin urinib ko'raman."
+
+    # Sezgir mavzu bo'lsa, AI "###JIM###" deb javob beradi - bunday holda
+    # hech narsa yubormaymiz, shunchaki xabarni e'tiborsiz qoldiramiz.
+    if "###JIM###" in reply_text:
+        logger.info(f"Sezgir mavzu aniqlandi, chat {chat_id} uchun javob yuborilmadi.")
+        history.append({"role": "assistant", "content": "(javob berilmadi)"})
+        return
 
     history.append({"role": "assistant", "content": reply_text})
 
