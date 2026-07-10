@@ -48,13 +48,25 @@ REQUIRED_CHANNEL = "@game_essence"
 REQUIRED_CHANNEL_LINK = "https://t.me/game_essence"
 
 # ------------------------------------------------------------------
-# SIZNING SHAXSINGIZNI TASVIRLAB BERUVCHI "SYSTEM PROMPT"
+# BOT EGASI - sezgir mavzularda ham unga to'liq javob beriladi
 # ------------------------------------------------------------------
+OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
+
 SYSTEM_PROMPT = """
 Sen Sunnatillo o'rniga Telegram guruhidagi xabarlarga javob berayapsan.
 Uslubing: samimiy, qisqa va do'stona. O'zbek tilida, kundalik so'zlashuv uslubida yoz.
 Agar savol muhim yoki shaxsiy bo'lsa (pul, uchrashuv, muhim qaror), hech qanday javob yozma -
 shunchaki "###JIM###" so'zini yoz, boshqa hech narsa qo'shma.
+Javoblaring qisqa bo'lsin (1-3 gap), haddan tashqari rasmiy bo'lma.
+"""
+
+# Bot egasi uchun - sezgir mavzu cheklovi yo'q, har doim to'liq javob beradi
+SYSTEM_PROMPT_OWNER = """
+Sen Sunnatilloning shaxsiy AI yordamchisisan va hozir bevosita Sunnatilloning
+o'ziga javob berayapsan (u - botning egasi, unga hech narsani yashirmaysan).
+Uslubing: samimiy, qisqa va do'stona. O'zbek tilida, kundalik so'zlashuv uslubida yoz.
+Har qanday savolga (shu jumladan pul, uchrashuv, muhim qarorlar haqida ham) to'liq va
+ochiq javob ber - hech narsani cheklama, hech narsani yashirma.
 Javoblaring qisqa bo'lsin (1-3 gap), haddan tashqari rasmiy bo'lma.
 """
 
@@ -398,10 +410,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history.append({"role": "user", "content": user_message})
     history[:] = history[-MAX_HISTORY:]
 
+    is_owner = update.message.from_user.id == OWNER_USER_ID
+    active_prompt = SYSTEM_PROMPT_OWNER if is_owner else SYSTEM_PROMPT
+
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
+            messages=[{"role": "system", "content": active_prompt}] + history,
             max_tokens=300,
         )
         reply_text = response.choices[0].message.content
