@@ -67,6 +67,12 @@ o'ziga javob berayapsan (u - botning egasi, unga hech narsani yashirmaysan).
 Uslubing: samimiy, qisqa va do'stona. O'zbek tilida, kundalik so'zlashuv uslubida yoz.
 Har qanday savolga (shu jumladan pul, uchrashuv, muhim qarorlar haqida ham) to'liq va
 ochiq javob ber - hech narsani cheklama, hech narsani yashirma.
+
+MUHIM: senda botning real ishlatilish statistikasi (kim yozgani, nechta odam
+foydalangani va h.k.) haqida HECH QANDAY ma'lumot yo'q. Agar shu haqida so'rasa,
+"Buni bilmayman, aniq ma'lumot uchun /stats komandasini yuboring" deb javob ber -
+hech qachon o'zingdan raqam yoki taxmin o'ylab topma.
+
 Javoblaring qisqa bo'lsin (1-3 gap), haddan tashqari rasmiy bo'lma.
 """
 
@@ -82,15 +88,130 @@ client = Groq(api_key=GROQ_API_KEY)
 chat_histories: dict[int, list[dict]] = {}
 MAX_HISTORY = 10
 
-# Bot bilan muloqotda bo'lgan barcha chatlar (guruh + shaxsiy) shu yerda saqlanadi.
+# Bot bilan muloqotda bo'lgan barcha chatlar (guruh + shaxsiy) shu yerda saqlanadi:
+# {chat_id: {"name": str, "type": str, "message_count": int}}
 # DIQQAT: RAM'da saqlanadi, bot qayta ishga tushsa (redeploy/restart) tozalanadi.
-known_chats: set[int] = set()
+known_chats: dict[int, dict] = {}
+
+# Oxirgi xabarlar jurnali (kim, qayerda, nima yozgani).
+# Faqat oxirgi 24 soatlik va oxirgi MAX_LOG_ENTRIES tagacha xabar saqlanadi.
+message_log: list[dict] = []
+MAX_LOG_ENTRIES = 300
+LOG_RETENTION = timedelta(hours=24)
+
+
+def prune_old_log_entries() -> None:
+    """24 soatdan eski yozuvlarni jurnaldan olib tashlaydi."""
+    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
+    while message_log and message_log[0]["timestamp"] < cutoff:
+        message_log.pop(0)
 
 
 async def track_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Har qanday kelgan xabardan chat ID sini eslab qoladi (reklama uchun kerak)."""
-    if update.effective_chat:
-        known_chats.add(update.effective_chat.id)
+    """Har qanday kelgan xabardan chat va xabar matnini eslab qoladi (statistika/reklama uchun)."""
+    chat = update.effective_chat
+    message = update.message
+    if not chat or not message:
+        return
+
+    if chat.type == "private":
+        user = update.effective_user
+        name = user.full_name if user else "Noma'lum"
+        username = f"@{user.username}" if user and user.username else "username yo'q"
+        display = f"{name} ({username})"
+        sender_name = display
+    else:
+        display = chat.title or "Nomsiz guruh"
+        user = update.effective_user
+        sender_name = user.full_name if user else "Noma'lum"
+
+    entry = known_chats.setdefault(
+        chat.id, {"name": display, "type": chat.type, "message_count": 0}
+    )
+    entry["name"] = display  # yangilanib tursin (ism/username o'zgargan bo'lishi mumkin)
+    entry["message_count"] += 1
+
+    if message.text:
+        message_log.append(
+            {
+                "chat_id": chat.id,
+                "chat_name": display,
+                "sender": sender_name,
+                "text": message.text,
+                "timestamp": message.date,  # timezone-aware datetime (UTC)
+            }
+        )
+        # Faqat oxirgi MAX_LOG_ENTRIES tasini saqlaymiz
+        if len(message_log) > MAX_LOG_ENTRIES:
+            del message_log[: len(message_log) - MAX_LOG_ENTRIES]
+
+    prune_old_log_entries()
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Faqat bot egasi uchun - botning haqiqiy foydalanilish statistikasini ko'rsatadi."""
+    if update.message.from_user.id != OWNER_USER_ID:
+        await update.message.reply_text("Bu komandani faqat bot egasi ishlatishi mumkin.")
+        return
+
+    if not known_chats:
+        await update.message.reply_text("Hozircha hech kim botga yozmagan.")
+        return
+
+    lines = ["\U0001F4CA Bot statistikasi:\n"]
+    for chat_id, info in sorted(
+        known_chats.items(), key=lambda x: x[1]["message_count"], reverse=True
+    ):
+        type_label = "shaxsiy" if info["type"] == "private" else "guruh"
+        lines.append(
+            f"\u2022 {info['name']} ({type_label}) \u2014 {info['message_count']} ta xabar "
+            f"[ID: {chat_id}]"
+        )
+
+    lines.append(f"\nJami: {len(known_chats)} ta chat.")
+    lines.append("\nOxirgi xabarlarni ko'rish uchun: /log")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Faqat bot egasi uchun - odamlar aynan nima yozganini ko'rsatadi.
+    Foydalanish: /log            - barcha chatlardan oxirgi 20 ta xabar
+                 /log <chat_id>  - faqat shu chatdan oxirgi 20 ta xabar
+    """
+    if update.message.from_user.id != OWNER_USER_ID:
+        await update.message.reply_text("Bu komandani faqat bot egasi ishlatishi mumkin.")
+        return
+
+    prune_old_log_entries()
+
+    entries = message_log
+    if context.args:
+        try:
+            filter_chat_id = int(context.args[0])
+            entries = [e for e in message_log if e["chat_id"] == filter_chat_id]
+        except ValueError:
+            await update.message.reply_text("Noto'g'ri chat ID formati.")
+            return
+
+    if not entries:
+        await update.message.reply_text("Oxirgi 24 soatda xabar bo'lmagan.")
+        return
+
+    last_entries = entries[-20:]
+    lines = ["\U0001F4DD Oxirgi 24 soatdagi xabarlar:\n"]
+    for e in last_entries:
+        time_str = e["timestamp"].strftime("%d.%m %H:%M")
+        lines.append(f"[{time_str}] {e['chat_name']} | {e['sender']}: {e['text']}")
+
+    text = "\n".join(lines)
+    # Telegram xabar uzunligi cheklovi (4096 belgi) - ehtiyot uchun qisqartiramiz
+    if len(text) > 4000:
+        text = text[-4000:]
+
+    await update.message.reply_text(text)
+
+
 
 
 async def is_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -154,7 +275,7 @@ async def reklama_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # Yuborish mo'ljallangan barcha chatlar: ma'lum bo'lgan chatlar + ALLOWED_CHAT_IDS
-    targets = known_chats | ALLOWED_CHAT_IDS
+    targets = set(known_chats.keys()) | ALLOWED_CHAT_IDS
 
     success = 0
     failed = 0
@@ -465,6 +586,12 @@ def main() -> None:
 
     # Reklama/e'lon yuborish komandasi (faqat adminlar uchun)
     app.add_handler(CommandHandler("reklama", reklama_command), group=1)
+
+    # Real statistikani ko'rsatish komandasi (faqat bot egasi uchun)
+    app.add_handler(CommandHandler("stats", stats_command), group=1)
+
+    # Odamlar aynan nima yozganini ko'rsatish komandasi (faqat bot egasi uchun)
+    app.add_handler(CommandHandler("log", log_command), group=1)
 
     # Guruh, superguruh va shaxsiy chat xabarlariga javob beradi
     # (guruhlarda faqat ALLOWED_CHAT_IDS ichidagilarga, shaxsiy chatda hamma uchun)
