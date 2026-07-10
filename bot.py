@@ -40,6 +40,14 @@ ALLOWED_CHAT_IDS = {
 }
 
 # ------------------------------------------------------------------
+# MAJBURIY OBUNA KANALI
+# Botdan foydalanish uchun foydalanuvchi shu kanalga obuna bo'lishi shart.
+# Bot shu kanalda ADMIN bo'lishi kerak (aks holda obunani tekshira olmaydi).
+# ------------------------------------------------------------------
+REQUIRED_CHANNEL = "@game_essence"
+REQUIRED_CHANNEL_LINK = "https://t.me/game_essence"
+
+# ------------------------------------------------------------------
 # SIZNING SHAXSINGIZNI TASVIRLAB BERUVCHI "SYSTEM PROMPT"
 # ------------------------------------------------------------------
 SYSTEM_PROMPT = """
@@ -61,6 +69,27 @@ client = Groq(api_key=GROQ_API_KEY)
 # Har bir chat uchun oxirgi bir nechta xabarni saqlab turamiz (soddalashtirilgan xotira)
 chat_histories: dict[int, list[dict]] = {}
 MAX_HISTORY = 10
+
+# Bot bilan muloqotda bo'lgan barcha chatlar (guruh + shaxsiy) shu yerda saqlanadi.
+# DIQQAT: RAM'da saqlanadi, bot qayta ishga tushsa (redeploy/restart) tozalanadi.
+known_chats: set[int] = set()
+
+
+async def track_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Har qanday kelgan xabardan chat ID sini eslab qoladi (reklama uchun kerak)."""
+    if update.effective_chat:
+        known_chats.add(update.effective_chat.id)
+
+
+async def is_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Foydalanuvchi REQUIRED_CHANNEL kanaliga obuna bo'lganini tekshiradi."""
+    try:
+        member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        return member.status not in ("left", "kicked")
+    except Exception as e:
+        logger.error(f"Obunani tekshirishda xatolik: {e}")
+        # Tekshira olmasak, ehtiyot uchun False qaytaramiz (foydalanishga ruxsat bermaymiz)
+        return False
 
 
 def parse_duration(text: str) -> timedelta | None:
@@ -84,6 +113,50 @@ def parse_duration(text: str) -> timedelta | None:
         return timedelta(hours=int(text))
     except ValueError:
         return None
+
+
+async def reklama_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /reklama <matn> - admin kiritgan matnni bot avval muloqotda bo'lgan
+    BARCHA guruh va shaxsiy chatlarga yuboradi.
+    Guruhda ishlatilsa - faqat o'sha guruh adminlari ishlata oladi.
+    Shaxsiy chatda ishlatilsa - faqat ALLOWED_CHAT_IDS ro'yxatidagi (ishonchli) odamlar ishlata oladi.
+    """
+    chat = update.effective_chat
+    message = update.message
+
+    # Ruxsat tekshiruvi
+    if chat.type == "private":
+        if message.from_user.id not in ALLOWED_CHAT_IDS:
+            await message.reply_text("Sizda bu komandani ishlatish huquqi yo'q.")
+            return
+    else:
+        requester = await chat.get_member(message.from_user.id)
+        if requester.status not in ("administrator", "creator"):
+            await message.reply_text("Bu komandani faqat adminlar ishlatishi mumkin.")
+            return
+
+    ad_text = " ".join(context.args) if context.args else None
+    if not ad_text:
+        await message.reply_text("Foydalanish: /reklama <matningiz>")
+        return
+
+    # Yuborish mo'ljallangan barcha chatlar: ma'lum bo'lgan chatlar + ALLOWED_CHAT_IDS
+    targets = known_chats | ALLOWED_CHAT_IDS
+
+    success = 0
+    failed = 0
+    for target_chat_id in targets:
+        try:
+            await context.bot.send_message(chat_id=target_chat_id, text=ad_text)
+            success += 1
+        except Exception as e:
+            logger.warning(f"Reklama {target_chat_id} ga yuborilmadi: {e}")
+            failed += 1
+
+    await message.reply_text(
+        f"Reklama yuborildi.\nMuvaffaqiyatli: {success}\nYuborilmadi: {failed}"
+    )
 
 
 async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -275,21 +348,16 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def is_bot_addressed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Guruhda bot faqat @mention qilinganda yoki unga reply qilinganda javob berishi kerak."""
+    """Guruhda bot faqat 'sunnatillo' so'zi aytilganda yoki unga reply qilinganda javob berishi kerak."""
     message = update.message
 
     # Bot xabariga reply qilingan bo'lsa
     if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
         return True
 
-    # Xabarda bot @username orqali mention qilingan bo'lsa
-    bot_username = context.bot.username
-    if bot_username and message.entities:
-        for entity in message.entities:
-            if entity.type == "mention":
-                mentioned = message.text[entity.offset: entity.offset + entity.length]
-                if mentioned.lower() == f"@{bot_username}".lower():
-                    return True
+    # Xabar matnida "sunnatillo" so'zi bo'lsa (katta-kichik harfga qaramasdan)
+    if message.text and "sunnatillo" in message.text.lower():
+        return True
 
     return False
 
@@ -309,6 +377,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Guruhda faqat mention yoki reply qilingandagina javob beradi.
     # Shaxsiy chatda esa har doim javob beradi.
     if chat.type != "private" and not is_bot_addressed(update, context):
+        return
+
+    # Botdan foydalanish uchun kerakli kanalga obuna bo'lgan bo'lishi shart
+    user_id = update.message.from_user.id
+    if not await is_subscribed(user_id, context):
+        await update.message.reply_text(
+            f"Botdan foydalanish uchun avval kanalimizga obuna bo'ling:\n"
+            f"{REQUIRED_CHANNEL_LINK}\n\n"
+            f"Obuna bo'lgach, xabaringizni qayta yuboring."
+        )
         return
 
     user_message = update.message.text
@@ -356,14 +434,21 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # Har qanday xabardan chat ID sini eslab qolish (reklama uchun) - alohida guruhda,
+    # bu boshqa handlerlar ishlashiga xalaqit bermaydi.
+    app.add_handler(MessageHandler(filters.ALL, track_chat), group=0)
+
     # Guruh ID sini topish uchun yordamchi komanda (istalgan joyda ishlaydi)
-    app.add_handler(CommandHandler("chatid", chatid_command))
+    app.add_handler(CommandHandler("chatid", chatid_command), group=1)
 
     # Foydalanuvchini vaqtincha cheklash komandasi (faqat adminlar uchun)
-    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("ban", ban_command), group=1)
 
     # Foydalanuvchidan cheklovni olib tashlash komandasi (faqat adminlar uchun)
-    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("unban", unban_command), group=1)
+
+    # Reklama/e'lon yuborish komandasi (faqat adminlar uchun)
+    app.add_handler(CommandHandler("reklama", reklama_command), group=1)
 
     # Guruh, superguruh va shaxsiy chat xabarlariga javob beradi
     # (guruhlarda faqat ALLOWED_CHAT_IDS ichidagilarga, shaxsiy chatda hamma uchun)
@@ -377,7 +462,8 @@ def main() -> None:
             )
             & ~filters.COMMAND,
             handle_message,
-        )
+        ),
+        group=1,
     )
 
     logger.info("Bot ishga tushdi...")
