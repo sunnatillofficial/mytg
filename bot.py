@@ -367,10 +367,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = chat.id
     logger.info(f"Xabar keldi. Chat ID: {chat_id}, Turi: {chat.type}, Ruxsat etilganlar: {ALLOWED_CHAT_IDS}")
 
-    # Guruh bo'lsin, shaxsiy chat bo'lsin - faqat ALLOWED_CHAT_IDS ro'yxatidagilarga javob beradi.
-    # Shaxsiy chatda: chat ID = foydalanuvchi ID bilan bir xil, shuning uchun
-    # kerakli odamning ID sini ham shu ro'yxatga qo'shsangiz bo'ldi.
-    if chat_id not in ALLOWED_CHAT_IDS:
+    # Guruhda - faqat ALLOWED_CHAT_IDS ro'yxatidagi guruhlarda javob beradi.
+    # Shaxsiy chatda - hammaga javob beradi (lekin pastda obuna tekshiriladi).
+    if chat.type != "private" and chat_id not in ALLOWED_CHAT_IDS:
         logger.info(f"Chat ID {chat_id} ruxsat etilganlar ro'yxatida yo'q, o'tkazib yuborildi.")
         return
 
@@ -383,9 +382,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.message.from_user.id
     if not await is_subscribed(user_id, context):
         await update.message.reply_text(
-            f"Botdan foydalanish uchun avval kanalimizga obuna bo'ling:\n"
-            f"{REQUIRED_CHANNEL_LINK}\n\n"
-            f"Obuna bo'lgach, xabaringizni qayta yuboring."
+            "\U0001F44B Assalomu alaykum!\n\n"
+            "Sunnatilloning shaxsiy botidan foydalanish uchun avval bizning "
+            f"kanalimizga obuna bo'lishingiz kerak:\n{REQUIRED_CHANNEL_LINK}\n\n"
+            "\u2705 Obuna bo'lgach, shu yerga xabaringizni qayta yuboring - "
+            "va suhbatni davom ettiramiz!"
         )
         return
 
