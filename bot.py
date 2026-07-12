@@ -250,8 +250,11 @@ def parse_duration(text: str) -> timedelta | None:
 
 async def reklama_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /reklama <matn> - admin kiritgan matnni bot avval muloqotda bo'lgan
-    BARCHA guruh va shaxsiy chatlarga yuboradi.
+    Reklamani yuboradi. Ikki xil ishlatish usuli bor:
+      1) Rasm/video/formatlash bilan: kerakli xabarni (rasm + matn, qalin harf va h.k.)
+         tayyorlang, o'sha xabarga REPLY qilib /reklama deb yozing.
+      2) Oddiy matn: /reklama <matningiz>
+    Bot avval muloqotda bo'lgan BARCHA guruh va shaxsiy chatlarga yuboradi.
     Guruhda ishlatilsa - faqat o'sha guruh adminlari ishlata oladi.
     Shaxsiy chatda ishlatilsa - faqat ALLOWED_CHAT_IDS ro'yxatidagi (ishonchli) odamlar ishlata oladi.
     """
@@ -269,23 +272,46 @@ async def reklama_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await message.reply_text("Bu komandani faqat adminlar ishlatishi mumkin.")
             return
 
-    ad_text = " ".join(context.args) if context.args else None
-    if not ad_text:
-        await message.reply_text("Foydalanish: /reklama <matningiz>")
-        return
-
     # Yuborish mo'ljallangan barcha chatlar: ma'lum bo'lgan chatlar + ALLOWED_CHAT_IDS
     targets = set(known_chats.keys()) | ALLOWED_CHAT_IDS
+    # O'zi yuborgan chatga qayta yubormasin (ixtiyoriy, lekin toza bo'ladi)
+    targets.discard(chat.id)
 
     success = 0
     failed = 0
-    for target_chat_id in targets:
-        try:
-            await context.bot.send_message(chat_id=target_chat_id, text=ad_text)
-            success += 1
-        except Exception as e:
-            logger.warning(f"Reklama {target_chat_id} ga yuborilmadi: {e}")
-            failed += 1
+
+    if message.reply_to_message:
+        # Rasm/video/formatlash saqlanadigan holat - xabarni nusxa (copy) qilib yuboramiz
+        source_chat_id = chat.id
+        source_message_id = message.reply_to_message.message_id
+        for target_chat_id in targets:
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_chat_id,
+                    from_chat_id=source_chat_id,
+                    message_id=source_message_id,
+                )
+                success += 1
+            except Exception as e:
+                logger.warning(f"Reklama {target_chat_id} ga yuborilmadi: {e}")
+                failed += 1
+    else:
+        # Oddiy matnli reklama
+        ad_text = " ".join(context.args) if context.args else None
+        if not ad_text:
+            await message.reply_text(
+                "Foydalanish:\n"
+                "\u2022 Rasm/formatlash bilan: kerakli xabarga REPLY qilib /reklama deb yozing\n"
+                "\u2022 Oddiy matn: /reklama <matningiz>"
+            )
+            return
+        for target_chat_id in targets:
+            try:
+                await context.bot.send_message(chat_id=target_chat_id, text=ad_text)
+                success += 1
+            except Exception as e:
+                logger.warning(f"Reklama {target_chat_id} ga yuborilmadi: {e}")
+                failed += 1
 
     await message.reply_text(
         f"Reklama yuborildi.\nMuvaffaqiyatli: {success}\nYuborilmadi: {failed}"
